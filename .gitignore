@@ -6,3 +6,22 @@ token.json
 .env
 .env
 token.json
+
+# Secrets
+.env
+token.json
+credentials.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+*.log
+*.pot
+
+# Virtual env
+venv/
+.envrc
