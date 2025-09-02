@@ -1,97 +1,107 @@
 # app/deps.py
-from __future__ import annotations
 from pathlib import Path
-import logging
-
 from googleapiclient.discovery import build
 
 from app.connectors.google_auth import get_credentials
 from app.connectors.google_calendar import GoogleCalendarConnector
 from app.connectors.google_tasks import GoogleTasksConnector
-from app.models import IntentResult  # your Pydantic models (for the router stub)
+
+# --- Robust imports for intent/whisper/media/messenger/logger ---
+def _try_import():
+    connector_candidates = [
+        ("app.connectors.intent_router", "IntentRouter"),
+        ("app.intent_router", "IntentRouter"),
+        ("app.connectors.intent", "IntentRouter"),
+        ("app.intent", "IntentRouter"),
+    ]
+    whisper_candidates = [
+        ("app.connectors.whisper_stub", "WhisperConnector"),
+        ("app.whisper_stub", "WhisperConnector"),
+        ("app.connectors.whisper", "WhisperConnector"),
+        ("app.whisper", "WhisperConnector"),
+    ]
+    media_candidates = [
+        ("app.connectors.media", "MediaConnector"),
+        ("app.media", "MediaConnector"),
+    ]
+    messenger_candidates = [
+        ("app.connectors.messenger", "MessengerConnector"),
+        ("app.messenger", "MessengerConnector"),
+    ]
+    logger_candidates = [
+        ("app.services.logger", "get_logger"),
+        ("app.logger", "get_logger"),
+    ]
+
+    def _import(cands, fallback):
+        for mod, name in cands:
+            try:
+                module = __import__(mod, fromlist=[name])
+                return getattr(module, name)
+            except Exception:
+                continue
+        return fallback
+
+    # Fallback stubs (only if real modules aren’t found)
+    import logging
+    class _FallbackIntent:
+        def __init__(self, logger=None): self.logger = logger
+        def parse(self, text):
+            from app.models import IntentResult
+            return IntentResult(intent="GENERAL_QA", confidence=0.5)
+        def generate_answer(self, q, **kwargs): return None
+
+    class _FallbackWhisper:
+        def __init__(self, logger=None): self.logger = logger
+        def transcribe(self, b, filename=None): return ""
+
+    class _FallbackMedia:
+        class Payload:
+            def __init__(self): self.bytes = b""; self.filename = "audio.ogg"
+        def __init__(self, logger=None): self.logger = logger
+        def fetch(self, form): return self.Payload()
+
+    class _FallbackMessenger:
+        def __init__(self, logger=None): self.logger = logger
+        def send(self, text):
+            logging.getLogger("assistant").info("Messenger(send): %s", text)
+
+    def _fallback_get_logger(name):
+        logging.basicConfig(level=logging.INFO)
+        return logging.getLogger(name)
+
+    Intent = _import(connector_candidates, _FallbackIntent)
+    Whisper = _import(whisper_candidates, _FallbackWhisper)
+    Media = _import(media_candidates, _FallbackMedia)
+    Messenger = _import(messenger_candidates, _FallbackMessenger)
+    get_logger_fn = _import(logger_candidates, _fallback_get_logger)
+    return Intent, Whisper, Media, Messenger, get_logger_fn
+
+IntentRouter, WhisperConnector, MediaConnector, MessengerConnector, get_logger = _try_import()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 def _resolve_path(p: str) -> Path:
     return (PROJECT_ROOT / p).resolve()
 
-# ----- Try to import your real connectors. If not found, provide stubs. -----
-try:
-    from app.connectors.intent_router import IntentRouter  # <- use your real router if available
-except Exception:
-    class IntentRouter:
-        def __init__(self, logger=None): self.logger = logger
-        def parse(self, text: str) -> IntentResult:
-            # Minimal “always QA” fallback
-            return IntentResult(intent="QUESTION", answer=None, confidence=0.7)
-        def generate_answer(self, text: str, domain=None, recency_required=None) -> str | None:
-            return None  # let main.py fall back to echo
-
-try:
-    from app.connectors.whisper_stub import WhisperConnector  # or your real Whisper connector
-except Exception:
-    class WhisperConnector:
-        def __init__(self, logger=None): self.logger = logger
-        def transcribe(self, audio_bytes: bytes, filename: str | None = None) -> str:
-            return ""  # noop
-
-try:
-    from app.connectors.media import MediaConnector
-except Exception:
-    class _Payload:
-        def __init__(self, bytes_: bytes = b"", filename: str | None = None):
-            self.bytes = bytes_
-            self.filename = filename or "voice.wav"
-    class MediaConnector:
-        def __init__(self, logger=None): self.logger = logger
-        def fetch(self, form) -> _Payload:
-            # Minimal Twilio form support
-            url = form.get("MediaUrl0")
-            if not url:
-                return _Payload()
-            # In a real impl: download the URL. For stub purposes return empty.
-            return _Payload()
-
-try:
-    from app.connectors.messenger import MessengerConnector
-except Exception:
-    class MessengerConnector:
-        def __init__(self, logger=None): self.logger = logger
-        def send(self, text: str) -> None:
-            (self.logger or logging.getLogger("messenger")).info("Messenger send: %s", text)
-
-def get_logger(name: str = "assistant"):
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        h = logging.StreamHandler()
-        h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        logger.addHandler(h)
-    return logger
-
 def build_connectors():
-    # One OAuth token for both Calendar + Tasks
     SCOPES = [
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/tasks",
     ]
     creds = get_credentials(scopes=SCOPES)
 
-    # Google services
+    # ✅ Build the Calendar service here and pass it into the connector
     calendar_service = build("calendar", "v3", credentials=creds)
-    tasks_service = build("tasks", "v1", credentials=creds)
 
     logger = get_logger("assistant")
 
-    # Domain connectors
-    calendar = GoogleCalendarConnector(service=calendar_service, logger=logger)
-    tasks = GoogleTasksConnector(service=tasks_service, logger=logger)
+    calendar = GoogleCalendarConnector(calendar_service, logger=logger)  # <-- positional
+    tasks = GoogleTasksConnector(logger=logger)  # your Tasks connector builds its own service
 
-    # Other connectors (real if available, otherwise stubs above)
     intent = IntentRouter(logger=logger)
     whisper = WhisperConnector(logger=logger)
     media = MediaConnector(logger=logger)
     messenger = MessengerConnector(logger=logger)
 
-    # Keep this exact order; main.py unpacks it
     return intent, whisper, media, calendar, tasks, messenger, logger
