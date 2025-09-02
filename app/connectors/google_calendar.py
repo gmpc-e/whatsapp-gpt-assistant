@@ -6,11 +6,24 @@ from zoneinfo import ZoneInfo
 from app.models import EventCreate, EventUpdate, EventUpdateChanges
 from app.utils.time_utils import normalize_event_datetimes, normalize_free_datetime
 from app.config import settings
+from app.connectors.google_auth import get_credentials
+from googleapiclient.discovery import build
 
 class GoogleCalendarConnector:
     def __init__(self, gcal_service, logger):
+        self.service = None
         self.svc = gcal_service
         self.logger = logger
+
+    def list_range(self, start_dt, end_dt):
+        res = self.service.events().list(
+            calendarId="primary",
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        return res.get("items", [])
 
     # ---- Create ----
     def create_event(self, event: EventCreate) -> Optional[str]:

@@ -8,3 +8,4 @@ google-auth-oauthlib
 apscheduler
 python-dotenv
 python-multipart
+dataparser
