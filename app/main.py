@@ -73,6 +73,15 @@ def disambig_text(cands):
     return "\n".join(lines)
 
 
+def task_list_disambig_text(lists):
+    lines = ["I found multiple task lists. Reply with a number:"]
+    for i, lst in enumerate(lists, start=1):
+        title = lst.get("title", "(no title)")
+        lines.append(f"{i}. {title}")
+    lines.append("Or reply '0' / 'cancel' to abort.")
+    return "\n".join(lines)
+
+
 @app.post("/whatsapp")
 async def webhook(request: Request):
     form = await request.form()
@@ -152,6 +161,22 @@ async def webhook(request: Request):
                 pending.pop(from_num)
                 return twiml("❎ Update cancelled.")
             return twiml("Reply '1' to apply update, or '0' to cancel.")
+
+        if ptype == "task_list_select":
+            if PendingStore.is_cancel(body):
+                pending.pop(from_num)
+                return twiml("❎ Task creation cancelled.")
+            choice = (body or "").strip()
+            if choice.isdigit():
+                idx = int(choice)
+                matching_lists = payload["matching_lists"]
+                if 1 <= idx <= len(matching_lists):
+                    chosen_list = matching_lists[idx - 1]
+                    task_data = payload["task_data"]
+                    created = tasks.create(task_data, chosen_list["id"])
+                    pending.pop(from_num)
+                    return twiml(f"🧩 Task created in '{chosen_list['title']}': {created.get('title')}")
+            return twiml(task_list_disambig_text(payload["matching_lists"]))
 
     # ---------- Voice handling ----------
     if num_media > 0:
@@ -255,8 +280,25 @@ async def webhook(request: Request):
 
         try:
             if op == "create" and getattr(result, "task", None):
-                created = tasks.create(result.task.model_dump())
-                return twiml(f"🧩 Task created: {created.get('title')}")
+                task_data = result.task.model_dump()
+                list_hint = task_data.get("list_hint")
+                
+                if list_hint:
+                    matching_lists = tasks.find_best_matching_list(list_hint)
+                    if not matching_lists:
+                        return twiml(f"🧩 I couldn't find a task list matching '{list_hint}'. Creating task in default list.")
+                    elif len(matching_lists) == 1:
+                        created = tasks.create(task_data, matching_lists[0]["id"])
+                        return twiml(f"🧩 Task created in '{matching_lists[0]['title']}': {created.get('title')}")
+                    else:
+                        pending.add(from_num, "task_list_select", {
+                            "task_data": task_data, 
+                            "matching_lists": matching_lists
+                        })
+                        return twiml(task_list_disambig_text(matching_lists))
+                else:
+                    created = tasks.create(task_data)
+                    return twiml(f"🧩 Task created: {created.get('title')}")
 
             elif op == "list":
                 if not criteria:
