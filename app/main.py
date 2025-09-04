@@ -386,7 +386,7 @@ async def webhook(request: Request):
                 status_filter = nlp_processor.extract_task_status_filter(body)
                 
                 if not criteria:
-                    criteria = {"date_hint": "tomorrow"}
+                    criteria = {}
                 
                 items = tasks.list(criteria)
                 
@@ -448,7 +448,27 @@ async def webhook(request: Request):
                     return twiml(f"✏️ Updated {len(updated)} task(s).")
 
             else:
-                return twiml("🤔 I didn’t get the task action. Try: create / list / complete / delete / update.")
+                # Fallback: try to detect task creation from natural language
+                if any(phrase in body.lower() for phrase in ['create task', 'task:', 'new task', 'add task']):
+                    text_lower = body.lower()
+                    title = None
+                    
+                    for pattern in ['create a task,', 'create task,', 'task:', 'new task:', 'add task:']:
+                        if pattern in text_lower:
+                            title_start = text_lower.find(pattern) + len(pattern)
+                            title = body[title_start:].strip()
+                            break
+                    
+                    if title:
+                        try:
+                            from app.models import TaskItem
+                            task_item = TaskItem(title=title)
+                            created = tasks.create(task_item.model_dump())
+                            return twiml(f"🧩 Task created: {created.get('title')}")
+                        except Exception as e:
+                            logger.error("Fallback task creation failed: %s", e)
+                
+                return twiml("🤔 I didn't get the task action. Try: create / list / complete / delete / update.")
         except Exception as e:
             logger.exception("TASK_OP failed")
             return twiml(f"⚠️ Task error: {e}")

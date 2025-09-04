@@ -89,10 +89,27 @@ class GoogleCalendarConnector:
 
         for ev in items:
             summary = (ev.get("summary") or "").lower()
-            if who and who not in summary:
-                continue
-            if title_hint and title_hint not in summary:
-                continue
+            location = (ev.get("location") or "").lower()
+            description = (ev.get("description") or "").lower()
+            
+            if who:
+                name_variations = [who]
+                if ' ' in who:
+                    name_variations.extend(who.split())
+                
+                found_person = any(
+                    any(name in field for name in name_variations)
+                    for field in [summary, location, description]
+                )
+                if not found_person:
+                    continue
+            
+            if title_hint:
+                title_words = title_hint.split()
+                found_title = any(word in summary for word in title_words)
+                if not found_title:
+                    continue
+            
             # time hint heuristic
             if time_hint and time_hint in {"morning","afternoon","evening"}:
                 try:
