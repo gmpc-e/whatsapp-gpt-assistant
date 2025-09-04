@@ -40,7 +40,9 @@ SYSTEM_PROMPT = (
     "Use AI-powered matching: extract person names, keywords from user text for criteria.\n"
     "For TASK_OP: CRITICAL FORMAT - task_op must be {\"op\": \"create|update|list|complete|delete\"}. "
     "For 'create', also fill 'task' with {title, date?, time?, notes?, location?}. "
+    "NEVER use 'description' field - always use 'title' for task names. "
     "EXAMPLES: 'create a task, buy some milk' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"buy some milk\"}}. "
+    "'create a task to do shopping' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"do shopping\"}}. "
     "'תוסיף משימה, לקנות עגבניות' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"לקנות עגבניות\"}}. "
     "'create few tasks, buy apples, buy oranges' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"tasks\":[{\"title\":\"buy apples\"},{\"title\":\"buy oranges\"}]}. "
     "'complete task buy some milk' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"complete\"}, \"task_update\":{\"criteria\":{\"title_hint\":\"buy some milk\"}, \"changes\":{}}}. "
@@ -138,6 +140,13 @@ class OpenAIIntentConnector:
                 elif isinstance(task_op_data, dict):
                     if "operation" in task_op_data:
                         result.task_op = TaskOp(op=task_op_data["operation"])
+                        if "description" in task_op_data:
+                            result.task = TaskItem(title=task_op_data["description"])
+                        elif "task" in task_op_data:
+                            if isinstance(task_op_data["task"], str):
+                                result.task = TaskItem(title=task_op_data["task"])
+                            elif isinstance(task_op_data["task"], dict):
+                                result.task = TaskItem(**task_op_data["task"])
                     elif "op" in task_op_data:
                         result.task_op = TaskOp(**task_op_data)
                     elif "create" in task_op_data:
