@@ -13,10 +13,12 @@ from app.models import (
     TaskUpdate,
 )
 from app.config import settings
+from app.utils.rate_limiter import rate_limiter
+from app.utils.performance_monitor import perf_monitor
 
 
 SYSTEM_PROMPT = (
-    "You are an intent router for a WhatsApp assistant. "
+    "You are an intent router for a WhatsApp assistant that handles calendar events, tasks, and general questions. "
     "Return ONLY strict JSON. The intents are: "
     "EVENT_TASK (create event), EVENT_UPDATE (modify existing event), TASK_OP (tasks), "
     "EVENT_LIST (list events), GENERAL_QA (general question), CHITCHAT (greeting/small talk).\n"
@@ -39,7 +41,13 @@ class OpenAIIntentConnector:
         self.logger = logger
         self.debug = debug
 
+    @perf_monitor.monitor("openai_intent_parse")
     def parse(self, user_text: str) -> IntentResult:
+        if not rate_limiter.is_allowed("openai_intent", settings.OPENAI_RATE_LIMIT_RPM, 60):
+            wait_time = rate_limiter.wait_time("openai_intent", settings.OPENAI_RATE_LIMIT_RPM, 60)
+            self.logger.warning("Rate limit exceeded, need to wait %.1f seconds", wait_time)
+            return IntentResult(intent="GENERAL_QA", answer="I'm processing too many requests right now. Please try again in a moment.")
+        
         now_local = dt.datetime.now(ZoneInfo(settings.TIMEZONE))
         system_prompt = (
             SYSTEM_PROMPT
@@ -57,12 +65,17 @@ class OpenAIIntentConnector:
             except Exception:
                 pass
 
-        completion = self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=messages,
-        )
-        raw = completion.choices[0].message.content
+        try:
+            completion = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                messages=messages,
+                timeout=30,
+            )
+            raw = completion.choices[0].message.content
+        except Exception as e:
+            self.logger.error("OpenAI API call failed: %s", e)
+            return IntentResult(intent="GENERAL_QA", answer="I'm having trouble processing your request right now. Please try again in a moment.")
         if self.debug:
             try:
                 self.logger.info("[GPT] Router <- %s", raw)
@@ -123,12 +136,17 @@ class OpenAIIntentConnector:
 
         return result
 
+    @perf_monitor.monitor("openai_generate_answer")
     def generate_answer(
         self,
         user_text: str,
         domain: Optional[str] = None,
         recency_required: Optional[bool] = None,
     ) -> str:
+        if not rate_limiter.is_allowed("openai_generate", settings.OPENAI_RATE_LIMIT_RPM, 60):
+            wait_time = rate_limiter.wait_time("openai_generate", settings.OPENAI_RATE_LIMIT_RPM, 60)
+            self.logger.warning("Rate limit exceeded for generation, need to wait %.1f seconds", wait_time)
+            return "I'm processing too many requests right now. Please try again in a moment."
         """
         High-quality general Q&A answer (WhatsApp-friendly).
         Uses a stronger prompt than the router and can switch models later if needed.
@@ -154,12 +172,17 @@ class OpenAIIntentConnector:
             except Exception:
                 pass
 
-        completion = self.client.chat.completions.create(
-            model=generation_model,
-            messages=messages,
-            temperature=0.7,
-        )
-        content = completion.choices[0].message.content or ""
+        try:
+            completion = self.client.chat.completions.create(
+                model=generation_model,
+                messages=messages,
+                temperature=0.7,
+                timeout=30,
+            )
+            content = completion.choices[0].message.content or ""
+        except Exception as e:
+            self.logger.error("OpenAI generation failed: %s", e)
+            return "I'm having trouble generating a response right now. Please try again in a moment."
 
         if self.debug:
             try:

@@ -14,14 +14,26 @@ from app.models import EventCreate, IntentResult
 from app.services.confirmation_store import PendingStore
 from app.services.scheduler import start_scheduler
 from app.utils.time_utils import normalize_event_datetimes
+from app.utils.validation import validate_phone_number, sanitize_text_input
+from app.utils.config_validator import validate_configuration
+from app.utils.performance_monitor import perf_monitor
+from app.connectors.enhanced_nlp import EnhancedNLPProcessor
 
 app = FastAPI(title="WhatsApp GPT Assistant")
+
+config_validation = validate_configuration()
+if not config_validation["valid"]:
+    import sys
+    print("Configuration validation failed. Check logs for details.")
+    sys.exit(1)
 
 # Build all connectors once
 intent, whisper, media, calendar, tasks, messenger, logger = build_connectors()
 
 # Pending multi-step interactions (create/confirm, update/select/confirm)
 pending = PendingStore(ttl_min=settings.CONFIRM_TTL_MIN)
+
+nlp_processor = EnhancedNLPProcessor()
 
 
 def twiml(text: str) -> Response:
@@ -33,6 +45,57 @@ def twiml(text: str) -> Response:
 @app.get("/")
 def health():
     return {"ok": True}
+
+@app.get("/health")
+def health_check():
+    """Comprehensive health check for all connectors"""
+    status = {"status": "healthy", "services": {}, "pending_confirmations": 0, "config_valid": True}
+    
+    try:
+        config_check = validate_configuration()
+        status["config_valid"] = config_check["valid"]
+        if not config_check["valid"]:
+            status["config_issues"] = config_check
+    except Exception:
+        status["config_valid"] = False
+    
+    try:
+        test_result = intent.parse("test")
+        status["services"]["intent"] = "ok" if test_result else "error"
+    except Exception:
+        status["services"]["intent"] = "error"
+    
+    try:
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        calendar.list_range(now, now + timedelta(hours=1))
+        status["services"]["calendar"] = "ok"
+    except Exception:
+        status["services"]["calendar"] = "error"
+    
+    try:
+        tasks.list({})
+        status["services"]["tasks"] = "ok"
+    except Exception:
+        status["services"]["tasks"] = "error"
+    
+    try:
+        stats = pending.get_stats()
+        status["pending_confirmations"] = stats["total"]
+        status["confirmation_breakdown"] = stats["by_type"]
+    except Exception:
+        status["pending_confirmations"] = "error"
+    
+    error_conditions = [
+        any(s == "error" for s in status["services"].values()),
+        not status["config_valid"],
+        status["pending_confirmations"] == "error"
+    ]
+    
+    if any(error_conditions):
+        status["status"] = "degraded"
+    
+    return status
 
 
 @app.get("/debug")
@@ -46,6 +109,22 @@ def debug():
         "resolved_token": str(_resolve_path(settings.GOOGLE_TOKEN_FILE)),
         "timezone": settings.TIMEZONE,
         "env_loaded": True,
+        "rate_limits": {
+            "rpm": settings.OPENAI_RATE_LIMIT_RPM,
+            "tpm": settings.OPENAI_RATE_LIMIT_TPM,
+        },
+        "connectors": {
+            "intent": str(type(intent)),
+            "calendar": str(type(calendar)),
+            "tasks": str(type(tasks)),
+            "whisper": str(type(whisper)),
+            "media": str(type(media)),
+        },
+        "pending_store": pending.get_stats(),
+        "performance": {
+            "openai_intent": perf_monitor.get_stats("openai_intent_parse"),
+            "openai_generate": perf_monitor.get_stats("openai_generate_answer"),
+        }
     }
 
 
@@ -75,10 +154,24 @@ def disambig_text(cands):
 
 @app.post("/whatsapp")
 async def webhook(request: Request):
-    form = await request.form()
-    from_num = form.get("From", "")
-    body = form.get("Body", "") or ""
-    num_media = int(form.get("NumMedia", "0"))
+    try:
+        form = await request.form()
+        from_num = form.get("From", "")
+        body = form.get("Body", "") or ""
+        try:
+            num_media = int(form.get("NumMedia", "0"))
+        except (ValueError, TypeError):
+            num_media = 0
+        
+        if not validate_phone_number(from_num):
+            logger.warning("Invalid phone number format: %s", from_num)
+            return twiml("Invalid phone number format.")
+        
+        body = sanitize_text_input(body)
+        
+    except Exception as e:
+        logger.error("Failed to parse webhook request: %s", e)
+        return twiml("Sorry, I couldn't process your message. Please try again.")
 
     logger.info(
         "Inbound: from=%s NumMedia=%s ctype=%s url=%s",
@@ -91,6 +184,8 @@ async def webhook(request: Request):
     # ---------- Pending multi-step flows ----------
     if pending.has(from_num):
         stash = pending.get(from_num)
+        if not stash:
+            return twiml("Session expired. Please try again.")
         ptype = stash["type"]
         payload = stash["payload"]
 
@@ -98,17 +193,22 @@ async def webhook(request: Request):
         if ptype == "create":
             if PendingStore.is_confirm(body):
                 ev: EventCreate = payload["event"]
-                link = calendar.create_event(ev)
-                sdt, edt = normalize_event_datetimes(ev, settings.TIMEZONE)
-                pending.pop(from_num)
-                msg = (
-                    "✅ Event added to Google Calendar.\n"
-                    f"🗓 {ev.title}\n"
-                    f"🕑 {sdt.strftime('%A, %Y-%m-%d %H:%M')} – {edt.strftime('%H:%M')} ({settings.TIMEZONE})"
-                )
-                if link:
-                    msg += f"\n📅 {link}"
-                return twiml(msg)
+                try:
+                    link = calendar.create_event(ev)
+                    sdt, edt = normalize_event_datetimes(ev, settings.TIMEZONE)
+                    pending.pop(from_num)
+                    msg = (
+                        "✅ Event added to Google Calendar.\n"
+                        f"🗓 {ev.title}\n"
+                        f"🕑 {sdt.strftime('%A, %Y-%m-%d %H:%M')} – {edt.strftime('%H:%M')} ({settings.TIMEZONE})"
+                    )
+                    if link:
+                        msg += f"\n📅 {link}"
+                    return twiml(msg)
+                except Exception as e:
+                    logger.error("Failed to create calendar event: %s", e)
+                    pending.pop(from_num)
+                    return twiml("❌ Sorry, I couldn't create the event. Please try again later.")
             if PendingStore.is_cancel(body):
                 pending.pop(from_num)
                 return twiml("❎ Event discarded.")
@@ -155,92 +255,112 @@ async def webhook(request: Request):
 
     # ---------- Voice handling ----------
     if num_media > 0:
-        payload = media.fetch(form)
-        transcript = whisper.transcribe(payload.bytes, filename=payload.filename).strip()
-        if transcript:
-            body = transcript
-        else:
-            return twiml("I received your voice note, but couldn’t transcribe it. Please try again?")
+        try:
+            payload = media.fetch(form)
+            transcript = whisper.transcribe(payload.bytes, filename=payload.filename).strip()
+            if transcript:
+                body = transcript
+            else:
+                return twiml("I received your voice note, but couldn't transcribe it. Please try again?")
+        except Exception as e:
+            logger.error("Voice transcription failed: %s", e)
+            return twiml("Sorry, I couldn't process your voice message. Please try sending text instead.")
 
     if not body.strip():
         return twiml("Send a message or voice note 😊")
 
     # ---------- Route intent ----------
-    result: IntentResult = intent.parse(body)
-    intent_name = getattr(result, "intent", None) or "GENERAL_QA"
+    try:
+        result: IntentResult = intent.parse(body)
+        intent_name = getattr(result, "intent", None) or "GENERAL_QA"
+    except Exception as e:
+        logger.error("Intent parsing failed: %s", e)
+        return twiml("I'm having trouble understanding your message. Could you please rephrase it?")
 
     # ----- EVENT_TASK (create, with preview/confirm) -----
     if intent_name == "EVENT_TASK" and getattr(result, "event", None):
-        pv = preview_text(result.event)
-        pending.add(from_num, "create", {"event": result.event, "preview_text": pv})
-        combined = ((result.answer or "") + "\n\n" if result.answer else "") + pv
-        return twiml(combined)
+        if result.event:
+            pv = preview_text(result.event)
+            pending.add(from_num, "create", {"event": result.event, "preview_text": pv})
+            combined = ((result.answer or "") + "\n\n" if result.answer else "") + pv
+            return twiml(combined)
 
     # ----- EVENT_UPDATE (find → select? → confirm) -----
     if intent_name == "EVENT_UPDATE" and getattr(result, "update", None):
-        cands = calendar.find_candidates(result.update.criteria, window_days=7)
-        if not cands:
-            return twiml("I couldn't find a matching event to update. Want to create a new one instead?")
-        if len(cands) == 1:
-            pending.add(from_num, "update_confirm", {"event": cands[0], "changes": result.update.changes})
-            return twiml("Found one match. Reply '1' / 'confirm' to apply the update, or '0' / 'cancel'.")
-        pending.add(from_num, "update_select", {"candidates": cands, "changes": result.update.changes})
-        return twiml(disambig_text(cands))
+        if result.update and result.update.criteria:
+            cands = calendar.find_candidates(result.update.criteria, window_days=7)
+            if not cands:
+                return twiml("I couldn't find a matching event to update. Want to create a new one instead?")
+            if len(cands) == 1:
+                pending.add(from_num, "update_confirm", {"event": cands[0], "changes": result.update.changes})
+                return twiml("Found one match. Reply '1' / 'confirm' to apply the update, or '0' / 'cancel'.")
+            pending.add(from_num, "update_select", {"candidates": cands, "changes": result.update.changes})
+            return twiml(disambig_text(cands))
 
-    # ----- EVENT_LIST (day/week pretty print) -----
+    # ----- EVENT_LIST (enhanced with NLP processing) -----
     if intent_name == "EVENT_LIST" and getattr(result, "list_query", None):
-        tz = ZoneInfo(settings.TIMEZONE)
-        today = dt.datetime.now(tz).date()
-
-        def _resolve_range(q):
-            d = today
-            if q.date_hint:
-                try:
-                    d = dt.date.fromisoformat(q.date_hint)
-                except Exception:
-                    pass
-            if q.scope == "day":
-                start = dt.datetime(d.year, d.month, d.day, 0, 0, tzinfo=tz)
-                end = start + dt.timedelta(days=1)
-            else:
-                monday = d - dt.timedelta(days=d.weekday())
-                start = dt.datetime(monday.year, monday.month, monday.day, 0, 0, tzinfo=tz)
-                end = start + dt.timedelta(days=7)
-            return start, end
-
-        start, end = _resolve_range(result.list_query)
-
         try:
+            start, end = nlp_processor.parse_date_range(body)
             events = calendar.list_range(start, end)
-        except NotImplementedError:
-            return twiml("Listing is not configured yet.")
+            
+            if any(word in body.lower() for word in ['free', 'available', 'open', 'slot', 'beach', 'break']):
+                free_slots = nlp_processor.find_free_slots(events, start, end, duration_hours=2)
+                if free_slots:
+                    lines = ["🏖️ Free time slots:"]
+                    for slot in free_slots[:5]:
+                        lines.append(f"• {slot['suggestion']}")
+                    return twiml("\n".join(lines))
+                else:
+                    return twiml("😅 No significant free slots found in that period.")
+            
+            if any(word in body.lower() for word in ['summary', 'overview', 'statistics', 'stats']):
+                period_name = "this period"
+                if "next week" in body.lower():
+                    period_name = "next week"
+                elif "this week" in body.lower():
+                    period_name = "this week"
+                elif "tomorrow" in body.lower():
+                    period_name = "tomorrow"
+                
+                try:
+                    task_list = tasks.list({})
+                    summary = nlp_processor.generate_summary(events, task_list, period_name)
+                    return twiml(summary)
+                except Exception:
+                    # Fallback to events-only summary
+                    summary = nlp_processor.generate_summary(events, [], period_name)
+                    return twiml(summary)
+            
+            def _pretty_events(evts):
+                if not evts:
+                    return "📭 No events found."
+                lines = ["🗓️ Events:"]
+                for e in evts:
+                    title = e.get("summary", "(no title)")
+                    loc = e.get("location") or ""
+                    desc = e.get("description") or ""
+                    s = e.get("start", {})
+                    start_iso = s.get("dateTime") or s.get("date")
+                    when = "(no time)"
+                    if start_iso:
+                        if "T" in start_iso:
+                            sdt = dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(ZoneInfo(settings.TIMEZONE))
+                            when = sdt.strftime("%a %Y-%m-%d %H:%M")
+                        else:
+                            when = f"{start_iso} (all-day)"
+                    line = f"• {when} — {title}"
+                    if loc:
+                        line += f" @ {loc}"
+                    if desc and len(desc) < 50:
+                        line += f"\n   {desc}"
+                    lines.append(line)
+                return "\n".join(lines)
 
-        def _pretty_events(evts):
-            if not evts:
-                return "📭 No events."
-            lines = ["🗓️ Upcoming:"]
-            for e in evts:
-                title = e.get("summary", "(no title)")
-                loc = e.get("location") or ""
-                desc = e.get("description") or ""
-                s = e.get("start", {})
-                start_iso = s.get("dateTime") or s.get("date")
-                when = "(no time)"
-                if start_iso:
-                    if "T" in start_iso:
-                        sdt = dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(tz)
-                        when = sdt.strftime("%a %Y-%m-%d %H:%M")
-                    else:
-                        when = f"{start_iso} (all-day)"
-                line = f"• {when} — {title}"
-                if loc:
-                    line += f" @ {loc}"
-                if desc:
-                    line += f"\n   {desc}"
-                lines.append(line)
-            return "\n".join(lines)
-
-        return twiml(_pretty_events(events))
+            return twiml(_pretty_events(events))
+            
+        except Exception as e:
+            logger.error("Enhanced event listing failed: %s", e)
+            return twiml("Sorry, I couldn't retrieve your events right now.")
 
     # ----- TASK_OP (Google Tasks) -----
     if intent_name == "TASK_OP" and getattr(result, "task_op", None) is not None:
@@ -249,55 +369,83 @@ async def webhook(request: Request):
         if isinstance(task_op_raw, str):
             op = task_op_raw.lower()
             criteria = {}
-        else:
+        elif task_op_raw:
             op = (task_op_raw.op or "").lower()
             criteria = task_op_raw.criteria or {}
+        else:
+            op = ""
+            criteria = {}
 
         try:
             if op == "create" and getattr(result, "task", None):
-                created = tasks.create(result.task.model_dump())
-                return twiml(f"🧩 Task created: {created.get('title')}")
+                if result.task:
+                    created = tasks.create(result.task.model_dump())
+                    return twiml(f"🧩 Task created: {created.get('title')}")
 
             elif op == "list":
+                status_filter = nlp_processor.extract_task_status_filter(body)
+                
                 if not criteria:
                     criteria = {"date_hint": "tomorrow"}
+                
                 items = tasks.list(criteria)
+                
+                if status_filter == "completed":
+                    items = [t for t in items if t.get("status") == "completed"]
+                elif status_filter == "open":
+                    items = [t for t in items if t.get("status") != "completed"]
+                
                 if not items:
-                    return twiml("📭 No tasks found.")
+                    status_msg = f" {status_filter}" if status_filter and status_filter != "all" else ""
+                    return twiml(f"📭 No{status_msg} tasks found.")
+                
+                if any(word in body.lower() for word in ['summary', 'overview', 'statistics', 'stats']):
+                    summary = nlp_processor.generate_summary([], items, "your tasks")
+                    return twiml(summary)
+                
                 tz = ZoneInfo(settings.TIMEZONE)
-                lines = ["🧩 Tasks:"]
+                status_label = f" {status_filter.title()}" if status_filter and status_filter != "all" else ""
+                lines = [f"🧩{status_label} Tasks ({len(items)}):"]
+                
                 for t in items:
                     title = t.get("title", "(no title)")
+                    status = t.get("status", "")
                     due = t.get("due")
+                    
+                    status_icon = "✅" if status == "completed" else "⏳"
+                    
                     if due:
                         try:
-                            # RFC3339 → local
                             if due.endswith("Z"):
                                 d_utc = dt.datetime.fromisoformat(due.replace("Z", "+00:00"))
                             else:
                                 d_utc = dt.datetime.fromisoformat(due)
                             local = d_utc.astimezone(tz)
-                            due_s = local.strftime("%Y-%m-%d %H:%M")
+                            due_s = local.strftime("%m/%d %H:%M")
+                            lines.append(f"{status_icon} {title} — due {due_s}")
                         except Exception:
-                            due_s = due
-                        lines.append(f"• {title} — due {due_s}")
+                            lines.append(f"{status_icon} {title} — due {due}")
                     else:
-                        lines.append(f"• {title}")
+                        lines.append(f"{status_icon} {title}")
+                
                 return twiml("\n".join(lines))
 
             elif op == "complete" and getattr(result, "task_update", None):
-                count = tasks.complete(result.task_update.model_dump())
-                return twiml(f"✅ Completed {count} task(s).")
+                if result.task_update:
+                    count = tasks.complete(result.task_update.model_dump())
+                    return twiml(f"✅ Completed {count} task(s).")
 
             elif op == "delete" and getattr(result, "task_update", None):
-                count = tasks.delete(result.task_update.model_dump())
-                return twiml(f"🗑️ Deleted {count} task(s).")
+                if result.task_update:
+                    count = tasks.delete(result.task_update.model_dump())
+                    return twiml(f"🗑️ Deleted {count} task(s).")
 
             elif op == "update" and getattr(result, "task_update", None):
-                updated = tasks.update(
-                    result.task_update.criteria or {}, result.task_update.changes or {}
-                )
-                return twiml(f"✏️ Updated {len(updated)} task(s).")
+                if result.task_update:
+                    updated = tasks.update(
+                        result.task_update.criteria or {}, result.task_update.changes or {}
+                    )
+                    return twiml(f"✏️ Updated {len(updated)} task(s).")
 
             else:
                 return twiml("🤔 I didn’t get the task action. Try: create / list / complete / delete / update.")
