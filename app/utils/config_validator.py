@@ -12,7 +12,7 @@ def validate_required_env_vars() -> List[str]:
         "OPENAI_API_KEY",
         "TWILIO_ACCOUNT_SID", 
         "TWILIO_AUTH_TOKEN",
-        "GOOGLE_CREDENTIALS_PATH",
+        "GOOGLE_CREDENTIALS_FILE",
     ]
     
     missing_vars = []
@@ -27,9 +27,9 @@ def validate_file_paths() -> List[str]:
     """Validate that required file paths exist."""
     file_paths = []
     
-    if settings.GOOGLE_CREDENTIALS_PATH:
-        if not os.path.exists(settings.GOOGLE_CREDENTIALS_PATH):
-            file_paths.append(f"Google credentials file not found: {settings.GOOGLE_CREDENTIALS_PATH}")
+    if settings.GOOGLE_CREDENTIALS_FILE:
+        if not os.path.exists(settings.GOOGLE_CREDENTIALS_FILE):
+            file_paths.append(f"Google credentials file not found: {settings.GOOGLE_CREDENTIALS_FILE}")
     
     return file_paths
 
