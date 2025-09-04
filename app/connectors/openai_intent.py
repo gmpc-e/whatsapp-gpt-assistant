@@ -157,11 +157,20 @@ class OpenAIIntentConnector:
                 task_data = data["task"]
                 if isinstance(task_data, str):
                     result.task = TaskItem(title=task_data)
-                else:
+                elif isinstance(task_data, dict):
                     result.task = TaskItem(**task_data)
+                else:
+                    result.task = TaskItem(title=str(task_data))
             except Exception as e:
                 self.logger.warning("Enhanced task parsing failed: %s", e)
-                pass
+                try:
+                    if isinstance(task_data, str):
+                        result.task = TaskItem(title=task_data)
+                    elif hasattr(task_data, 'get'):
+                        title = task_data.get('title') or str(task_data)
+                        result.task = TaskItem(title=title)
+                except Exception:
+                    pass
         if data.get("task_update"):
             try:
                 result.task_update = TaskUpdate(**data["task_update"])

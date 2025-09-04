@@ -536,6 +536,66 @@ async def webhook(request: Request):
                         except Exception as e:
                             logger.error("Fallback task creation failed: %s", e)
                 
+                hebrew_patterns = ['תוסיף משימה', 'משימה חדשה', 'הוסף משימה']
+                english_patterns = ['create task', 'task:', 'new task', 'add task', 'create a task']
+                
+                if any(phrase in body.lower() for phrase in english_patterns) or any(phrase in body for phrase in hebrew_patterns):
+                    title = None
+                    
+                    for pattern in ['תוסיף משימה,', 'תוסיף משימה -', 'תוסיף משימה חדשה -', 'משימה חדשה -', 'הוסף משימה:']:
+                        if pattern in body:
+                            start_idx = body.find(pattern) + len(pattern)
+                            title = body[start_idx:].strip()
+                            break
+                    
+                    if not title:
+                        text_lower = body.lower()
+                        patterns = [
+                            'create a task,',
+                            'create a task -',
+                            'create task,',
+                            'create task -',
+                            'task:',
+                            'new task:',
+                            'add task:'
+                        ]
+                        
+                        for pattern in patterns:
+                            if pattern in text_lower:
+                                title_start = text_lower.find(pattern) + len(pattern)
+                                title = body[title_start:].strip()
+                                break
+                        
+                        if not title:
+                            for pattern in ['create task ', 'new task ', 'add task ', 'create a task ']:
+                                if pattern in text_lower:
+                                    title_start = text_lower.find(pattern) + len(pattern)
+                                    title = body[title_start:].strip()
+                                    break
+                    
+                    if title:
+                        try:
+                            task_item = TaskItem(title=title)
+                            created = tasks.create(task_item.model_dump())
+                            return twiml(f"🧩 Task created: {created.get('title')}")
+                        except Exception as e:
+                            logger.error("Fallback task creation failed: %s", e)
+                            return twiml(f"⚠️ Failed to create task: {e}")
+                
+                if any(word in body.lower() for word in ['task', 'משימה']) and any(word in body.lower() for word in ['create', 'add', 'new', 'תוסיף', 'הוסף']):
+                    words = body.split()
+                    if len(words) > 2:
+                        for i, word in enumerate(words):
+                            if word.lower() in ['task', 'משימה'] and i < len(words) - 1:
+                                title = ' '.join(words[i+1:]).strip('.,!?')
+                                if title:
+                                    try:
+                                        task_item = TaskItem(title=title)
+                                        created = tasks.create(task_item.model_dump())
+                                        return twiml(f"🧩 Task created: {created.get('title')}")
+                                    except Exception as e:
+                                        logger.error("Final fallback task creation failed: %s", e)
+                
                 return twiml("🤔 I didn't get the task action. Try: create / list / complete / delete / update.")
         except Exception as e:
             logger.exception("TASK_OP failed")
