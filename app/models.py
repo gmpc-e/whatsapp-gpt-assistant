@@ -114,6 +114,9 @@ class IntentResult(BaseModel):
     task_op: Optional[TaskOp] = None
     task: Optional[TaskItem] = None
     task_update: Optional[TaskUpdate] = None
+    tasks: Optional[List[Dict[str, Any]]] = None
 
     # listing (NEW)
     list_query: Optional[EventListQuery] = None
+    
+    _raw_data: Optional[Dict[str, Any]] = None

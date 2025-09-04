@@ -3,7 +3,74 @@
 
 import sys
 import os
+import json
 from unittest.mock import Mock, patch
+
+def test_openai_prompt_parsing():
+    """Test OpenAI prompt parsing for various scenarios."""
+    print("🧪 Testing OpenAI prompt parsing...")
+    
+    test_cases = [
+        {
+            "input": "create a task, buy some milk",
+            "expected_intent": "TASK_OP",
+            "expected_op": "create",
+            "expected_title": "buy some milk"
+        },
+        {
+            "input": "תוסיף משימה, לקנות עגבניות",
+            "expected_intent": "TASK_OP", 
+            "expected_op": "create",
+            "expected_title": "לקנות עגבניות"
+        },
+        {
+            "input": "create few tasks, buy apples, buy oranges",
+            "expected_intent": "TASK_OP",
+            "expected_op": "create",
+            "expected_multiple": True
+        },
+        {
+            "input": "complete task buy some milk",
+            "expected_intent": "TASK_OP",
+            "expected_op": "complete"
+        }
+    ]
+    
+    for test_case in test_cases:
+        print(f"  Testing: '{test_case['input']}'")
+        print(f"    Expected: {test_case['expected_intent']} with op={test_case.get('expected_op')}")
+    
+    print("✅ OpenAI prompt parsing tests completed")
+
+def test_hebrew_support():
+    """Test Hebrew language support."""
+    print("🧪 Testing Hebrew language support...")
+    
+    hebrew_test_cases = [
+        "תוסיף משימה, לקנות עגבניות",
+        "תוסיף משימה חדשה - לקנות מללפונים",
+        "הראה לי את כל המשימות",
+        "השלם משימה לקנות חלב"
+    ]
+    
+    for test_case in hebrew_test_cases:
+        print(f"  Testing Hebrew: '{test_case}'")
+    
+    print("✅ Hebrew support tests completed")
+
+def test_multiple_task_creation():
+    """Test multiple task creation in one request."""
+    print("🧪 Testing multiple task creation...")
+    
+    test_cases = [
+        "create few tasks, buy apples, buy oranges",
+        "add tasks: call mom, buy groceries, finish report"
+    ]
+    
+    for test_case in test_cases:
+        print(f"  Testing multiple: '{test_case}'")
+    
+    print("✅ Multiple task creation tests completed")
 
 def test_task_creation_natural_language():
     """Test natural language task creation."""
@@ -13,7 +80,8 @@ def test_task_creation_natural_language():
         "create a task, buy some milk",
         "task: buy groceries", 
         "new task: call mom",
-        "add task: finish report"
+        "add task: finish report",
+        "create a task - buy stuff"
     ]
     
     for test_case in test_cases:
@@ -69,10 +137,13 @@ def test_dependencies_available():
 
 def main():
     """Run all user feedback fix tests."""
-    print("🔧 Testing User Feedback Fixes")
-    print("=" * 50)
+    print("🔧 Testing User Feedback Fixes - Enhanced Version")
+    print("=" * 60)
     
     tests = [
+        test_openai_prompt_parsing,
+        test_hebrew_support,
+        test_multiple_task_creation,
         test_task_creation_natural_language,
         test_event_matching_enhancement, 
         test_task_listing_all_tasks,

@@ -10,7 +10,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from app.config import settings
 from app.deps import build_connectors, PROJECT_ROOT, _resolve_path
-from app.models import EventCreate, IntentResult
+from app.models import EventCreate, IntentResult, TaskItem
 from app.services.confirmation_store import PendingStore
 from app.services.scheduler import start_scheduler
 from app.utils.time_utils import normalize_event_datetimes
@@ -377,16 +377,40 @@ async def webhook(request: Request):
             criteria = {}
 
         try:
-            if op == "create" and getattr(result, "task", None):
-                if result.task:
+            if op == "create":
+                if hasattr(result, 'tasks') and getattr(result, 'tasks', None):
+                    created_tasks = []
+                    for task_data in result.tasks:
+                        if isinstance(task_data, dict):
+                            task_item = TaskItem(**task_data)
+                            created = tasks.create(task_item.model_dump())
+                            created_tasks.append(created.get('title', 'Untitled'))
+                    if created_tasks:
+                        return twiml(f"🧩 Created {len(created_tasks)} tasks: {', '.join(created_tasks)}")
+                
+                elif getattr(result, "task", None):
                     created = tasks.create(result.task.model_dump())
                     return twiml(f"🧩 Task created: {created.get('title')}")
+                
+                # Fallback: extract from raw OpenAI response
+                elif hasattr(result, '_raw_data') and result._raw_data.get('tasks'):
+                    created_tasks = []
+                    for task_data in result._raw_data['tasks']:
+                        if isinstance(task_data, dict) and 'title' in task_data:
+                            task_item = TaskItem(**task_data)
+                            created = tasks.create(task_item.model_dump())
+                            created_tasks.append(created.get('title', 'Untitled'))
+                    if created_tasks:
+                        return twiml(f"🧩 Created {len(created_tasks)} tasks: {', '.join(created_tasks)}")
 
             elif op == "list":
                 status_filter = nlp_processor.extract_task_status_filter(body)
                 
                 if not criteria:
                     criteria = {}
+                
+                if 'date_hint' in criteria and not any(word in body.lower() for word in ['today', 'tomorrow', 'this week', 'next week']):
+                    del criteria['date_hint']
                 
                 items = tasks.list(criteria)
                 
@@ -430,10 +454,30 @@ async def webhook(request: Request):
                 
                 return twiml("\n".join(lines))
 
-            elif op == "complete" and getattr(result, "task_update", None):
-                if result.task_update:
+            elif op == "complete":
+                if getattr(result, "task_update", None):
                     count = tasks.complete(result.task_update.model_dump())
                     return twiml(f"✅ Completed {count} task(s).")
+                else:
+                    # Fallback: try to extract task title from natural language
+                    if any(phrase in body.lower() for phrase in ['complete task', 'finish task', 'done task']):
+                        text_lower = body.lower()
+                        for pattern in ['complete task ', 'finish task ', 'done task ']:
+                            if pattern in text_lower:
+                                title_start = text_lower.find(pattern) + len(pattern)
+                                title_hint = body[title_start:].strip()
+                                if title_hint:
+                                    try:
+                                        from app.models import TaskUpdate
+                                        task_update = TaskUpdate(
+                                            criteria={"title_hint": title_hint},
+                                            changes={}
+                                        )
+                                        count = tasks.complete(task_update.model_dump())
+                                        return twiml(f"✅ Completed {count} task(s) matching '{title_hint}'.")
+                                    except Exception as e:
+                                        logger.error("Fallback task completion failed: %s", e)
+                                break
 
             elif op == "delete" and getattr(result, "task_update", None):
                 if result.task_update:
