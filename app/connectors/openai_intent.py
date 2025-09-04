@@ -140,13 +140,20 @@ class OpenAIIntentConnector:
                         result.task_op = TaskOp(op=task_op_data["operation"])
                     elif "op" in task_op_data:
                         result.task_op = TaskOp(**task_op_data)
+                    elif "create" in task_op_data:
+                        result.task_op = TaskOp(op="create")
+                        if isinstance(task_op_data["create"], list):
+                            result.tasks = [{"title": task} if isinstance(task, str) else task for task in task_op_data["create"]]
                     else:
                         result.task_op = TaskOp(op="create")
                 else:
                     result.task_op = TaskOp(**task_op_data)
             except Exception as e:
                 self.logger.warning("Task op parsing failed: %s", e)
-                pass
+                try:
+                    result.task_op = TaskOp(op="create")
+                except Exception:
+                    pass
         if data.get("list_query"):
             try:
                 result.list_query = EventListQuery(**data["list_query"])

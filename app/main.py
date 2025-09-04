@@ -385,6 +385,10 @@ async def webhook(request: Request):
                             task_item = TaskItem(**task_data)
                             created = tasks.create(task_item.model_dump())
                             created_tasks.append(created.get('title', 'Untitled'))
+                        elif isinstance(task_data, str):
+                            task_item = TaskItem(title=task_data)
+                            created = tasks.create(task_item.model_dump())
+                            created_tasks.append(created.get('title', 'Untitled'))
                     if created_tasks:
                         return twiml(f"🧩 Created {len(created_tasks)} tasks: {', '.join(created_tasks)}")
                 
@@ -400,8 +404,36 @@ async def webhook(request: Request):
                             task_item = TaskItem(**task_data)
                             created = tasks.create(task_item.model_dump())
                             created_tasks.append(created.get('title', 'Untitled'))
+                        elif isinstance(task_data, str):
+                            task_item = TaskItem(title=task_data)
+                            created = tasks.create(task_item.model_dump())
+                            created_tasks.append(created.get('title', 'Untitled'))
                     if created_tasks:
                         return twiml(f"🧩 Created {len(created_tasks)} tasks: {', '.join(created_tasks)}")
+                
+                elif any(phrase in body.lower() for phrase in ['create a task', 'add task', 'new task', 'create task']) or any(phrase in body for phrase in ['תוסיף משימה', 'משימה חדשה', 'הוסף משימה']):
+                    title = None
+                    
+                    for pattern in ['תוסיף משימה,', 'תוסיף משימה -', 'תוסיף משימה חדשה -', 'משימה חדשה -', 'הוסף משימה:']:
+                        if pattern in body:
+                            start_idx = body.find(pattern) + len(pattern)
+                            title = body[start_idx:].strip()
+                            break
+                    
+                    if not title:
+                        text_lower = body.lower()
+                        for pattern in ['create a task,', 'create a task -', 'create task,', 'create task -', 'add task:', 'new task:']:
+                            if pattern in text_lower:
+                                title_start = text_lower.find(pattern) + len(pattern)
+                                title = body[title_start:].strip()
+                                if title:
+                                    try:
+                                        task_item = TaskItem(title=title)
+                                        created = tasks.create(task_item.model_dump())
+                                        return twiml(f"🧩 Task created: {created.get('title')}")
+                                    except Exception as e:
+                                        logger.error("Fallback task creation failed: %s", e)
+                                break
 
             elif op == "list":
                 status_filter = nlp_processor.extract_task_status_filter(body)
