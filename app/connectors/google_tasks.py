@@ -113,9 +113,46 @@ class GoogleTasksConnector:
         self._tasklist_id_cache = created["id"]
         return self._tasklist_id_cache
 
-    def create(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def list_tasklists(self) -> List[Dict[str, Any]]:
         svc = self._get_service()
-        tasklist_id = self._get_tasklist_id()
+        items: List[Dict[str, Any]] = []
+        page_token = None
+        while True:
+            resp = svc.tasklists().list(maxResults=100, pageToken=page_token).execute()
+            items.extend(resp.get("items", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return items
+
+    def find_best_matching_list(self, list_hint: str) -> List[Dict[str, Any]]:
+        if not list_hint:
+            return []
+
+        all_lists = self.list_tasklists()
+        list_hint_lower = list_hint.lower()
+
+        exact_matches = [lst for lst in all_lists if lst.get("title", "").lower() == list_hint_lower]
+        if exact_matches:
+            return exact_matches
+
+        partial_matches = [lst for lst in all_lists if list_hint_lower in lst.get("title", "").lower()]
+        if partial_matches:
+            return partial_matches
+
+        hint_words = list_hint_lower.split()
+        fuzzy_matches = []
+        for lst in all_lists:
+            title_lower = lst.get("title", "").lower()
+            if any(word in title_lower for word in hint_words):
+                fuzzy_matches.append(lst)
+
+        return fuzzy_matches
+
+    def create(self, item: Dict[str, Any], tasklist_id: Optional[str] = None) -> Dict[str, Any]:
+        svc = self._get_service()
+        if tasklist_id is None:
+            tasklist_id = self._get_tasklist_id()
         body = {
             "title": item["title"],
             "notes": _notes_with_location(item.get("notes"), item.get("location")),

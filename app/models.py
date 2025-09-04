@@ -82,6 +82,7 @@ class TaskItem(BaseModel):
     time: Optional[str] = None            # "HH:MM" (optional)
     notes: Optional[str] = None
     location: Optional[str] = None        # stored inside notes (Tasks has no location field)
+    list_hint: Optional[str] = None       # hint for which task list to use
 
 
 class TaskUpdate(BaseModel):
