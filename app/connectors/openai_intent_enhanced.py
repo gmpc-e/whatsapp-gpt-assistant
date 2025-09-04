@@ -17,6 +17,7 @@ from app.models import (
     EventListQuery,
     TaskItem,
     TaskUpdate,
+    TaskOp,
 )
 from app.config import settings
 from app.utils.rate_limiter import rate_limiter
@@ -25,7 +26,7 @@ from app.utils.performance_monitor import perf_monitor
 
 ENHANCED_SYSTEM_PROMPT = (
     "You are an advanced intent router for a WhatsApp assistant that handles calendar events, tasks, and general questions. "
-    "Return ONLY strict JSON. The intents are: "
+    "Support Hebrew, English, and mixed languages. Return ONLY strict JSON. The intents are: "
     "EVENT_TASK (create event), EVENT_UPDATE (modify existing event), TASK_OP (tasks), "
     "EVENT_LIST (list events, free slots, summaries), GENERAL_QA (general question), CHITCHAT (greeting/small talk).\n"
     
@@ -42,6 +43,16 @@ ENHANCED_SYSTEM_PROMPT = (
     
     "When EVENT_TASK, fill 'event'. When EVENT_UPDATE, fill 'update'. When TASK_OP, fill 'task_op'. "
     "When EVENT_LIST, fill 'list_query' with scope (day/week) and date_hint if specific.\n"
+    "For TASK_OP: CRITICAL FORMAT - task_op must be {\"op\": \"create|update|list|complete|delete\"}. "
+    "For 'create', also fill 'task' with {title, date?, time?, notes?, location?}. "
+    "NEVER use 'description' field - always use 'title' for task names. "
+    "EXAMPLES: 'create a task, buy some milk' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"buy some milk\"}}. "
+    "'create a task to do shopping' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"do shopping\"}}. "
+    "'תוסיף משימה, לקנות עגבניות' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"task\":{\"title\":\"לקנות עגבניות\"}}. "
+    "'create few tasks, buy apples, buy oranges' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"create\"}, \"tasks\":[{\"title\":\"buy apples\"},{\"title\":\"buy oranges\"}]}. "
+    "'complete task buy some milk' -> {\"intent\":\"TASK_OP\", \"task_op\":{\"op\":\"complete\"}, \"task_update\":{\"criteria\":{\"title_hint\":\"buy some milk\"}, \"changes\":{}}}. "
+    "For 'list', if no specific filter mentioned, show ALL tasks (don't add date filters). "
+    "For 'update'/'complete'/'delete', fill 'task_update' with {criteria:{title_hint?, date_hint?}, changes:{new_title?, new_date?, new_time?, new_notes?}}.\n"
     "For tasks: support 'create', 'list', 'update', 'complete', 'delete' operations.\n"
     "Always include 'answer' field with helpful response text."
 )
@@ -140,23 +151,76 @@ class EnhancedOpenAIIntentConnector:
 
         elif intent_name == "TASK_OP":
             if "task_op" in data:
-                task_op_data = data["task_op"]
-                if isinstance(task_op_data, str):
-                    result.task_op = task_op_data
-                else:
-                    result.task_op = TaskUpdate(**task_op_data)
+                try:
+                    task_op_data = data["task_op"]
+                    if isinstance(task_op_data, str):
+                        result.task_op = TaskOp(op=task_op_data)
+                    elif isinstance(task_op_data, dict):
+                        if "operation" in task_op_data:
+                            result.task_op = TaskOp(op=task_op_data["operation"])
+                            if "description" in task_op_data:
+                                result.task = TaskItem(title=task_op_data["description"])
+                            elif "task" in task_op_data:
+                                if isinstance(task_op_data["task"], str):
+                                    result.task = TaskItem(title=task_op_data["task"])
+                                elif isinstance(task_op_data["task"], dict):
+                                    result.task = TaskItem(**task_op_data["task"])
+                        elif "op" in task_op_data:
+                            result.task_op = TaskOp(**task_op_data)
+                        elif "create" in task_op_data:
+                            result.task_op = TaskOp(op="create")
+                            if isinstance(task_op_data["create"], list):
+                                result.tasks = [{"title": task} if isinstance(task, str) else task for task in task_op_data["create"]]
+                        else:
+                            result.task_op = TaskOp(op="create")
+                    else:
+                        result.task_op = TaskOp(**task_op_data)
+                except Exception as e:
+                    self.logger.warning("Enhanced task op parsing failed: %s", e)
+                    try:
+                        result.task_op = TaskOp(op="create")
+                    except Exception:
+                        pass
             
             if "task" in data:
                 try:
-                    result.task = TaskItem(**data["task"])
+                    task_data = data["task"]
+                    if isinstance(task_data, str):
+                        result.task = TaskItem(title=task_data)
+                    elif isinstance(task_data, dict):
+                        result.task = TaskItem(**task_data)
+                    else:
+                        result.task = TaskItem(title=str(task_data))
                 except Exception as e:
                     self.logger.warning("Enhanced task parsing failed: %s", e)
+                    try:
+                        if isinstance(task_data, str):
+                            result.task = TaskItem(title=task_data)
+                        elif hasattr(task_data, 'get'):
+                            title = task_data.get('title') or str(task_data)
+                            result.task = TaskItem(title=title)
+                    except Exception:
+                        pass
+            
+            if "tasks" in data:
+                try:
+                    result.tasks = []
+                    for task_data in data["tasks"]:
+                        if isinstance(task_data, dict):
+                            result.tasks.append(task_data)
+                        elif isinstance(task_data, str):
+                            result.tasks.append({"title": task_data})
+                except Exception as e:
+                    self.logger.warning("Enhanced multiple tasks parsing failed: %s", e)
+                    pass
             
             if "task_update" in data:
                 try:
                     result.task_update = TaskUpdate(**data["task_update"])
                 except Exception as e:
                     self.logger.warning("Enhanced task update parsing failed: %s", e)
+        
+        result._raw_data = data
 
         return result
 
