@@ -114,17 +114,25 @@ class GoogleTasksConnector:
         return self._tasklist_id_cache
 
     def create(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        svc = self._get_service()
-        tasklist_id = self._get_tasklist_id()
-        body = {
-            "title": item["title"],
-            "notes": _notes_with_location(item.get("notes"), item.get("location")),
-            "status": "needsAction",
-        }
-        due = _to_rfc3339_due(item.get("date"), item.get("time"))
-        if due:
-            body["due"] = due
-        return svc.tasks().insert(tasklist=tasklist_id, body=body).execute()
+        if not item.get("title"):
+            raise ValueError("Task title is required")
+        
+        try:
+            svc = self._get_service()
+            tasklist_id = self._get_tasklist_id()
+            body = {
+                "title": item["title"],
+                "notes": _notes_with_location(item.get("notes"), item.get("location")),
+                "status": "needsAction",
+            }
+            due = _to_rfc3339_due(item.get("date"), item.get("time"))
+            if due:
+                body["due"] = due
+            return svc.tasks().insert(tasklist=tasklist_id, body=body).execute()
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Failed to create task: %s", e)
+            raise
 
     def list(self, criteria: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         svc = self._get_service()

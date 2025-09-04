@@ -5,6 +5,10 @@ from googleapiclient.discovery import build
 from app.connectors.google_auth import get_credentials
 from app.connectors.google_calendar import GoogleCalendarConnector
 from app.connectors.google_tasks import GoogleTasksConnector
+from app.connectors.openai_intent_enhanced import EnhancedOpenAIIntentConnector
+from app.connectors.openai_whisper import OpenAIWhisperConnector
+from app.connectors.media_fetch import TwilioMediaFetcher
+from app.config import settings
 
 # --- Robust imports for intent/whisper/media/messenger/logger ---
 def _try_import():
@@ -94,14 +98,30 @@ def build_connectors():
     # ✅ Build the Calendar service here and pass it into the connector
     calendar_service = build("calendar", "v3", credentials=creds)
 
+    from app.utils.logging_config import get_connector_logger
+    
     logger = get_logger("assistant")
+    intent_logger = get_connector_logger("intent")
+    calendar_logger = get_connector_logger("calendar")
+    tasks_logger = get_connector_logger("tasks")
+    whisper_logger = get_connector_logger("whisper")
+    media_logger = get_connector_logger("media")
 
-    calendar = GoogleCalendarConnector(calendar_service, logger=logger)  # <-- positional
-    tasks = GoogleTasksConnector(logger=logger)  # your Tasks connector builds its own service
+    calendar = GoogleCalendarConnector(calendar_service, logger=calendar_logger)
+    tasks = GoogleTasksConnector(logger=tasks_logger)
 
-    intent = IntentRouter(logger=logger)
-    whisper = WhisperConnector(logger=logger)
-    media = MediaConnector(logger=logger)
+    try:
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        intent = EnhancedOpenAIIntentConnector(openai_client, logger=intent_logger, debug=settings.DEBUG_LOG_PROMPTS)
+        whisper = OpenAIWhisperConnector(openai_client, logger=whisper_logger)
+        media = TwilioMediaFetcher(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN, logger=media_logger)
+    except Exception as e:
+        logger.warning("Failed to create enhanced connectors, using fallbacks: %s", e)
+        intent = IntentRouter(logger=intent_logger)
+        whisper = WhisperConnector(logger=whisper_logger)
+        media = MediaConnector(logger=media_logger)
+    
     messenger = MessengerConnector(logger=logger)
 
     return intent, whisper, media, calendar, tasks, messenger, logger

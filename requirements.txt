@@ -9,3 +9,7 @@ apscheduler
 python-dotenv
 python-multipart
 dataparser
+dateparser
+pydantic-settings
+pytest
+pytest-asyncio

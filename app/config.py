@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     DAILY_DIGEST_MINUTE: int = 0
 
     CONFIRM_TTL_MIN: int = 10
+    
+    OPENAI_RATE_LIMIT_RPM: int = 60
+    OPENAI_RATE_LIMIT_TPM: int = 40000
 
     # Pydantic v2 config: load .env and IGNORE unknown keys
     model_config = SettingsConfigDict(

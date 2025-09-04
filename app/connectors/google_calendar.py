@@ -7,6 +7,8 @@ from app.models import EventCreate, EventUpdate, EventUpdateChanges
 from app.utils.time_utils import normalize_event_datetimes, normalize_free_datetime
 from app.config import settings
 from app.connectors.google_auth import get_credentials
+from app.utils.error_handler import handle_api_errors
+from app.connectors.recurring_events import RecurringEventHelper
 from googleapiclient.discovery import build
 
 class GoogleCalendarConnector:
@@ -15,8 +17,9 @@ class GoogleCalendarConnector:
         self.svc = gcal_service
         self.logger = logger
 
+    @handle_api_errors(fallback_message="Failed to list calendar events")
     def list_range(self, start_dt, end_dt):
-        res = self.service.events().list(
+        res = self.svc.events().list(
             calendarId="primary",
             timeMin=start_dt.isoformat(),
             timeMax=end_dt.isoformat(),
@@ -26,25 +29,37 @@ class GoogleCalendarConnector:
         return res.get("items", [])
 
     # ---- Create ----
-    def create_event(self, event: EventCreate) -> Optional[str]:
-        start_dt, end_dt = normalize_event_datetimes(event, settings.TIMEZONE)
-        body = {
-            "summary": event.title or "Untitled",
-            "location": event.location or "",
-            "description": event.notes or "",
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": settings.TIMEZONE},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": settings.TIMEZONE},
-            "reminders": {"useDefault": True},
-        }
-        if settings.DEBUG_LOG_PROMPTS:
-            self.logger.info("[GCAL] Creating: %s", json.dumps(body, ensure_ascii=False))
-        created = self.svc.events().insert(calendarId="primary", body=body).execute()
-        link = created.get("htmlLink")
-        if settings.DEBUG_LOG_PROMPTS:
-            self.logger.info("[GCAL] Created -> %s", json.dumps(created, ensure_ascii=False))
-        return link
+    def create_event(self, event: EventCreate, recurrence_pattern: Optional[str] = None) -> Optional[str]:
+        if not event.title:
+            raise ValueError("Event title is required")
+        
+        try:
+            start_dt, end_dt = normalize_event_datetimes(event, settings.TIMEZONE)
+            body = {
+                "summary": event.title,
+                "location": event.location or "",
+                "description": event.notes or "",
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": settings.TIMEZONE},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": settings.TIMEZONE},
+                "reminders": {"useDefault": True},
+            }
+            
+            if recurrence_pattern:
+                body = RecurringEventHelper.enhance_event_for_recurrence(body, recurrence_pattern)
+            
+            if settings.DEBUG_LOG_PROMPTS:
+                self.logger.info("[GCAL] Creating: %s", json.dumps(body, ensure_ascii=False))
+            created = self.svc.events().insert(calendarId="primary", body=body).execute()
+            link = created.get("htmlLink")
+            if settings.DEBUG_LOG_PROMPTS:
+                self.logger.info("[GCAL] Created -> %s", json.dumps(created, ensure_ascii=False))
+            return link
+        except Exception as e:
+            self.logger.error("Failed to create calendar event: %s", e)
+            raise
 
     # ---- Search for update candidates ----
+    @handle_api_errors(fallback_message="Failed to search calendar events")
     def search_events_window(self, start: dt.datetime, end: dt.datetime) -> List[Dict[str, Any]]:
         timeMin = start.isoformat()
         timeMax = end.isoformat()
@@ -74,10 +89,27 @@ class GoogleCalendarConnector:
 
         for ev in items:
             summary = (ev.get("summary") or "").lower()
-            if who and who not in summary:
-                continue
-            if title_hint and title_hint not in summary:
-                continue
+            location = (ev.get("location") or "").lower()
+            description = (ev.get("description") or "").lower()
+            
+            if who:
+                name_variations = [who]
+                if ' ' in who:
+                    name_variations.extend(who.split())
+                
+                found_person = any(
+                    any(name in field for name in name_variations)
+                    for field in [summary, location, description]
+                )
+                if not found_person:
+                    continue
+            
+            if title_hint:
+                title_words = title_hint.split()
+                found_title = any(word in summary for word in title_words)
+                if not found_title:
+                    continue
+            
             # time hint heuristic
             if time_hint and time_hint in {"morning","afternoon","evening"}:
                 try:
