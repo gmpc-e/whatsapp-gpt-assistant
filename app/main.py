@@ -10,7 +10,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from app.config import settings
 from app.deps import build_connectors, PROJECT_ROOT, _resolve_path
-from app.models import EventCreate, IntentResult, TaskItem
+from app.models import EventCreate, IntentResult, TaskItem, TaskUpdate
 from app.services.confirmation_store import PendingStore
 from app.services.scheduler import start_scheduler
 from app.utils.time_utils import normalize_event_datetimes
@@ -468,7 +468,6 @@ async def webhook(request: Request):
                                 title_hint = body[title_start:].strip()
                                 if title_hint:
                                     try:
-                                        from app.models import TaskUpdate
                                         task_update = TaskUpdate(
                                             criteria={"title_hint": title_hint},
                                             changes={}
@@ -492,20 +491,45 @@ async def webhook(request: Request):
                     return twiml(f"✏️ Updated {len(updated)} task(s).")
 
             else:
-                # Fallback: try to detect task creation from natural language
-                if any(phrase in body.lower() for phrase in ['create task', 'task:', 'new task', 'add task']):
-                    text_lower = body.lower()
+                hebrew_patterns = ['תוסיף משימה', 'משימה חדשה', 'הוסף משימה']
+                english_patterns = ['create task', 'task:', 'new task', 'add task', 'create a task']
+                
+                if any(phrase in body.lower() for phrase in english_patterns) or any(phrase in body for phrase in hebrew_patterns):
                     title = None
                     
-                    for pattern in ['create a task,', 'create task,', 'task:', 'new task:', 'add task:']:
-                        if pattern in text_lower:
-                            title_start = text_lower.find(pattern) + len(pattern)
-                            title = body[title_start:].strip()
+                    for pattern in ['תוסיף משימה,', 'תוסיף משימה -', 'תוסיף משימה חדשה -', 'משימה חדשה -', 'הוסף משימה:']:
+                        if pattern in body:
+                            start_idx = body.find(pattern) + len(pattern)
+                            title = body[start_idx:].strip()
                             break
+                    
+                    if not title:
+                        text_lower = body.lower()
+                        patterns = [
+                            'create a task,',
+                            'create a task -',
+                            'create task,',
+                            'create task -',
+                            'task:',
+                            'new task:',
+                            'add task:'
+                        ]
+                        
+                        for pattern in patterns:
+                            if pattern in text_lower:
+                                title_start = text_lower.find(pattern) + len(pattern)
+                                title = body[title_start:].strip()
+                                break
+                        
+                        if not title:
+                            for pattern in ['create task ', 'new task ', 'add task ', 'create a task ']:
+                                if pattern in text_lower:
+                                    title_start = text_lower.find(pattern) + len(pattern)
+                                    title = body[title_start:].strip()
+                                    break
                     
                     if title:
                         try:
-                            from app.models import TaskItem
                             task_item = TaskItem(title=title)
                             created = tasks.create(task_item.model_dump())
                             return twiml(f"🧩 Task created: {created.get('title')}")
